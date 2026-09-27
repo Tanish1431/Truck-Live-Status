@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { io } from 'socket.io-client';
 import { 
@@ -23,7 +23,8 @@ import {
   X,
   ArrowRight,
   OctagonAlert,
-  CircleCheck
+  CircleCheck,
+  Flag
 } from 'lucide-react';
 
 const SOCKET_SERVER_URL = 'http://localhost:5000';
@@ -44,25 +45,61 @@ function MapInstanceCapture({ onMapReady }) {
   return null;
 }
 
-// Generate dynamic SVG Leaflet marker for each truck
+// Generate waypoint marker icon for route origins and destinations
+const createWaypointIcon = (name, type) => {
+  const isStart = type === 'start';
+  const color = isStart ? '#10b981' : '#ef4444';
+  return L.divIcon({
+    className: 'custom-waypoint-marker',
+    html: `
+      <div style="position: relative; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center;">
+        <div style="width: 14px; height: 14px; border-radius: 50%; background: ${color}; border: 2.5px solid #ffffff; box-shadow: 0 0 12px ${color};"></div>
+        <div style="position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%); background: rgba(15, 23, 42, 0.95); color: #e2e8f0; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); white-space: nowrap; pointer-events: none; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
+          ${isStart ? '🏁 ' : '📍 '}${name}
+        </div>
+      </div>
+    `,
+    iconSize: [26, 26],
+    iconAnchor: [13, 13],
+    popupAnchor: [0, -16]
+  });
+};
+
+// ===========================================================================
+// PRECISE TRUCK ICON GENERATOR
+// Anchored geometrically at [20, 20] (the exact center of the 36px circle).
+// Zero displacement across all zoom levels. Includes directional road pointer.
+// ===========================================================================
 const createTruckIcon = (truck, isSelected) => {
   const isHighPriority = truck.priority === 'High';
   const isInTransit = truck.status === 'In Transit';
   const isDelayed = truck.trafficStatus === 'HIGH';
   
-  // Theme colors: red for delayed, red for high priority, blue for transit, amber for other
+  // Theme colors: orange for delayed, red for high priority, blue for transit, amber for other
   const primaryColor = isDelayed ? '#f97316' : isHighPriority ? '#ef4444' : isInTransit ? '#0284c7' : '#f59e0b';
   const ringColor = isSelected ? '#ffffff' : primaryColor;
   const pulseEffect = isHighPriority || truck.truckId === 'TR-101' ? 'marker-live-pulse' : '';
+  const bearing = typeof truck.bearing === 'number' ? truck.bearing : 0;
+  const isMoving = truck.speed > 0;
 
   return L.divIcon({
     className: 'custom-truck-marker',
     html: `
-      <div style="display:flex; flex-direction:column; align-items:center; transform: translate(-50%, -100%);">
-        <div style="background: rgba(15, 23, 42, 0.95); color: #f8fafc; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px; border: 1.5px solid ${primaryColor}; white-space: nowrap; margin-bottom: 3px; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
+      <div style="position: relative; width: 40px; height: 40px; pointer-events: auto;">
+        <!-- Top Floating Status Pill (Centered horizontally, above circle) -->
+        <div style="position: absolute; bottom: 44px; left: 50%; transform: translateX(-50%); background: rgba(15, 23, 42, 0.95); color: #f8fafc; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px; border: 1.5px solid ${primaryColor}; white-space: nowrap; box-shadow: 0 4px 10px rgba(0,0,0,0.6); pointer-events: none;">
           ${truck.truckId} &bull; ${truck.speed} km/h ${isDelayed ? '⚠️' : ''}
         </div>
-        <div class="${pulseEffect}" style="background-color: ${primaryColor}; width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2.5px solid ${ringColor}; box-shadow: 0 6px 14px rgba(0,0,0,0.5);">
+
+        <!-- Directional Road Heading Pointer (Rotates along road bearing) -->
+        ${isMoving ? `
+          <div style="position: absolute; inset: -5px; pointer-events: none; transform: rotate(${bearing}deg); display: flex; justify-content: center; align-items: flex-start; z-index: 5;">
+            <div style="width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 8px solid ${ringColor}; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.8));"></div>
+          </div>
+        ` : ''}
+
+        <!-- Vehicle Center Circle (Centered exactly at [20, 20]) -->
+        <div class="${pulseEffect}" style="position: absolute; top: 2px; left: 2px; background-color: ${primaryColor}; width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2.5px solid ${ringColor}; box-shadow: 0 4px 14px rgba(0,0,0,0.6); z-index: 10;">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <rect x="1" y="3" width="15" height="13"></rect>
             <polygon points="16 8 20 8 23 11 23 16 16 16 16 8"></polygon>
@@ -72,14 +109,85 @@ const createTruckIcon = (truck, isSelected) => {
         </div>
       </div>
     `,
-    iconSize: [42, 54],
-    iconAnchor: [21, 54],
-    popupAnchor: [0, -54]
+    iconSize: [40, 40],
+    iconAnchor: [20, 20],
+    popupAnchor: [0, -28]
   });
 };
 
+// ===========================================================================
+// SMOOTH TRUCK MARKER COMPONENT
+// Smoothly animates geographic coordinates between 2-second telemetry ticks
+// using requestAnimationFrame and native Leaflet setLatLng.
+// Zoom-safe and Pan-safe: zero drifting or dislocation during map zoom.
+// ===========================================================================
+function SmoothTruckMarker({ truck, isSelected, onSelect, children }) {
+  const markerRef = useRef(null);
+  const animFrameRef = useRef(null);
+  const startPosRef = useRef(null);
+  const targetPosRef = useRef([truck.latitude, truck.longitude]);
+  const startTimeRef = useRef(0);
+  const duration = 1900; // Interpolate over 1.9s between 2.0s telemetry ticks
+
+  useEffect(() => {
+    if (!markerRef.current) return;
+    const newTarget = [truck.latitude, truck.longitude];
+
+    if (!startPosRef.current) {
+      startPosRef.current = newTarget;
+      targetPosRef.current = newTarget;
+      markerRef.current.setLatLng(newTarget);
+      return;
+    }
+
+    const currentLatLng = markerRef.current.getLatLng();
+    startPosRef.current = [currentLatLng.lat, currentLatLng.lng];
+    targetPosRef.current = newTarget;
+    startTimeRef.current = performance.now();
+
+    const animate = (time) => {
+      const elapsed = time - startTimeRef.current;
+      const progress = Math.min(1, elapsed / duration);
+
+      const currentLat = startPosRef.current[0] + (targetPosRef.current[0] - startPosRef.current[0]) * progress;
+      const currentLng = startPosRef.current[1] + (targetPosRef.current[1] - startPosRef.current[1]) * progress;
+
+      if (markerRef.current) {
+        markerRef.current.setLatLng([currentLat, currentLng]);
+      }
+
+      if (progress < 1) {
+        animFrameRef.current = requestAnimationFrame(animate);
+      }
+    };
+
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+    }
+    animFrameRef.current = requestAnimationFrame(animate);
+
+    return () => {
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+      }
+    };
+  }, [truck.latitude, truck.longitude]);
+
+  return (
+    <Marker
+      ref={markerRef}
+      position={[truck.latitude, truck.longitude]}
+      icon={createTruckIcon(truck, isSelected)}
+      eventHandlers={{ click: () => onSelect(truck) }}
+    >
+      {children}
+    </Marker>
+  );
+}
+
 export default function App() {
   const [trucks, setTrucks] = useState([]);
+  const [routes, setRoutes] = useState({});
   const [selectedTruck, setSelectedTruck] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [lastReceivedTime, setLastReceivedTime] = useState(null);
@@ -102,7 +210,7 @@ export default function App() {
 
   // 1. Initial REST fetch + Socket.IO connection with disruption listeners
   useEffect(() => {
-    // Initial REST fetch
+    // Initial REST fetch for trucks
     fetch(`${SOCKET_SERVER_URL}/api/trucks`)
       .then(res => res.json())
       .then(result => {
@@ -115,6 +223,18 @@ export default function App() {
       })
       .catch(err => {
         console.warn('Initial REST load error (will rely on Socket):', err);
+      });
+
+    // Initial REST fetch for road routes
+    fetch(`${SOCKET_SERVER_URL}/api/routes`)
+      .then(res => res.json())
+      .then(result => {
+        if (result.success && result.data) {
+          setRoutes(result.data);
+        }
+      })
+      .catch(err => {
+        console.warn('Initial routes fetch error (will rely on Socket):', err);
       });
 
     // Establish Socket.IO connection
@@ -175,6 +295,12 @@ export default function App() {
       console.log('[Socket.IO] APPOINTMENT_RISK:', data);
       setAppointmentRisk(data);
       setShowRiskAlert(true);
+    });
+
+    // routesData: Receives complete OSRM road coordinates
+    socket.on('routesData', (data) => {
+      console.log('[Socket.IO] routesData received:', Object.keys(data));
+      setRoutes(data);
     });
 
     socket.on('disconnect', () => {
@@ -452,14 +578,89 @@ export default function App() {
           {/* Captures map instance into mapInstanceRef for explicit user "Locate" clicks only */}
           <MapInstanceCapture onMapReady={handleMapReady} />
 
+          {/* ============================================================ */}
+          {/* OSRM ROAD ROUTE POLYLINES & WAYPOINT PINS                   */}
+          {/* Renders exact road path geometries on OpenStreetMap         */}
+          {/* ============================================================ */}
+          {Object.entries(routes).map(([routeTruckId, routeInfo]) => {
+            if (!routeInfo.routeCoords || routeInfo.routeCoords.length === 0) return null;
+            const isRouteSelected = selectedTruck?.truckId === routeTruckId;
+            const truckForRoute = trucks.find(t => t.truckId === routeTruckId);
+            const isDelayed = truckForRoute?.trafficStatus === 'HIGH';
+
+            const activeColor = isDelayed ? '#f97316' : '#0284c7';
+            const lineColor = isRouteSelected ? activeColor : '#475569';
+
+            return (
+              <React.Fragment key={`route-group-${routeTruckId}`}>
+                {/* Outer route glow */}
+                <Polyline
+                  positions={routeInfo.routeCoords}
+                  pathOptions={{
+                    color: isRouteSelected ? lineColor : '#334155',
+                    weight: isRouteSelected ? 8 : 4,
+                    opacity: isRouteSelected ? 0.35 : 0.2,
+                    lineCap: 'round',
+                    lineJoin: 'round'
+                  }}
+                />
+                {/* Main directed road polyline */}
+                <Polyline
+                  positions={routeInfo.routeCoords}
+                  pathOptions={{
+                    color: lineColor,
+                    weight: isRouteSelected ? 4 : 2.5,
+                    opacity: isRouteSelected ? 0.95 : 0.45,
+                    dashArray: isRouteSelected ? undefined : '6, 8',
+                    lineCap: 'round',
+                    lineJoin: 'round'
+                  }}
+                />
+                {/* Route Origin Pin */}
+                {routeInfo.start && (
+                  <Marker
+                    position={[routeInfo.start.lat, routeInfo.start.lon]}
+                    icon={createWaypointIcon(routeInfo.start.name || 'Origin Depot', 'start')}
+                  >
+                    <Popup className="enterprise-popup" autoPan={false}>
+                      <div className="p-3 bg-slate-900 text-slate-100 rounded-xl text-xs">
+                        <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block mb-1">🏁 Origin Depot</span>
+                        <strong className="text-white text-sm">{routeInfo.start.name}</strong>
+                        <p className="text-slate-400 mt-1">Route for {routeTruckId}</p>
+                      </div>
+                    </Popup>
+                  </Marker>
+                )}
+                {/* Route Destination Pin */}
+                {routeInfo.end && (
+                  <Marker
+                    position={[routeInfo.end.lat, routeInfo.end.lon]}
+                    icon={createWaypointIcon(routeInfo.end.name || 'Destination Hub', 'end')}
+                  >
+                    <Popup className="enterprise-popup" autoPan={false}>
+                      <div className="p-3 bg-slate-900 text-slate-100 rounded-xl text-xs">
+                        <span className="text-[10px] font-bold text-rose-400 uppercase tracking-wider block mb-1">📍 Destination Hub</span>
+                        <strong className="text-white text-sm">{routeInfo.end.name}</strong>
+                        <p className="text-slate-400 mt-1">Route for {routeTruckId}</p>
+                      </div>
+                    </Popup>
+                  </Marker>
+                )}
+              </React.Fragment>
+            );
+          })}
+
+          {/* ============================================================ */}
+          {/* LIVE TRUCK MARKERS WITH ROAD-SNAPPED SMOOTH MOVEMENT        */}
+          {/* ============================================================ */}
           {trucks.map((truck) => {
             const isSelected = selectedTruck?.truckId === truck.truckId;
             return (
-              <Marker
+              <SmoothTruckMarker
                 key={truck.truckId}
-                position={[truck.latitude, truck.longitude]}
-                icon={createTruckIcon(truck, isSelected)}
-                eventHandlers={{ click: () => handleSelectTruck(truck) }}
+                truck={truck}
+                isSelected={isSelected}
+                onSelect={handleSelectTruck}
               >
                 <Popup className="enterprise-popup" autoPan={false}>
                   <div className="p-4 w-72 bg-slate-900 text-slate-100 rounded-xl">
@@ -585,7 +786,7 @@ export default function App() {
                     </div>
                   </div>
                 </Popup>
-              </Marker>
+              </SmoothTruckMarker>
             );
           })}
         </MapContainer>

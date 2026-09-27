@@ -19,18 +19,15 @@ html, body, #root {
   background: #0f172a;
 }
 
-/* Custom Marker Styling & Smooth Live Movement */
+/* Custom Marker Styling */
 .custom-truck-marker {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
+  background: transparent !important;
+  border: none !important;
 }
 
-/* Smooth physical gliding for moving Leaflet markers */
-.leaflet-marker-icon {
-  transition: transform 1.8s linear !important;
+.custom-waypoint-marker {
+  background: transparent !important;
+  border: none !important;
 }
 
 

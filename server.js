@@ -70,6 +70,22 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
 }
 
 // ==============================================================================
+// CALCULATE COMPASS BEARING (HEADING) BETWEEN TWO GPS POINTS
+// Returns heading in degrees (0 = North, 90 = East, 180 = South, 270 = West)
+// ==============================================================================
+function calculateBearing(lat1, lon1, lat2, lon2) {
+  if (lat1 === lat2 && lon1 === lon2) return 0;
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const toDeg = (rad) => (rad * 180) / Math.PI;
+  const dLon = toRad(lon2 - lon1);
+  const y = Math.sin(dLon) * Math.cos(toRad(lat2));
+  const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+            Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
+  const brng = (toDeg(Math.atan2(y, x)) + 360) % 360;
+  return Math.round(brng);
+}
+
+// ==============================================================================
 // CALCULATE REMAINING ROUTE DISTANCE & ETA
 // Now works with the OSRM route coordinate array instead of the old 7-waypoint
 // array. Sums haversine distance from current position through remaining coords.
@@ -244,6 +260,7 @@ const trucks = [
     latitude: TRUCK_ROUTES['TR-101'].start.lat,
     longitude: TRUCK_ROUTES['TR-101'].start.lon,
     speed: 45, // km/h — this is used for distance-based movement
+    bearing: 250,
     status: 'In Transit',
     priority: 'High',
     appointmentEndTime: new Date(Date.now() + 35 * 60 * 1000).toISOString(),
@@ -256,6 +273,7 @@ const trucks = [
     latitude: 13.0067,
     longitude: 80.2025,
     speed: 0,
+    bearing: 0,
     status: 'Loading',
     priority: 'Medium',
     appointmentEndTime: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
@@ -268,6 +286,7 @@ const trucks = [
     latitude: TRUCK_ROUTES['TR-103'].start.lat,
     longitude: TRUCK_ROUTES['TR-103'].start.lon,
     speed: 55,
+    bearing: 200,
     status: 'In Transit',
     priority: 'Low',
     appointmentEndTime: new Date(Date.now() + 45 * 60 * 1000).toISOString(),
@@ -308,6 +327,19 @@ io.on('connection', (socket) => {
   trucks.forEach(truck => {
     socket.emit('truckLocationUpdate', truck);
   });
+
+  // Push full OSRM road route geometries so frontend renders road polylines
+  const allRoutes = {};
+  for (const [id, s] of Object.entries(truckRouteState)) {
+    if (s.routeCoords) {
+      allRoutes[id] = {
+        routeCoords: s.routeCoords,
+        start: TRUCK_ROUTES[id]?.start,
+        end: TRUCK_ROUTES[id]?.end
+      };
+    }
+  }
+  socket.emit('routesData', allRoutes);
 
   // If there's an active delay, notify the new client immediately
   if (trafficDelayActive) {
@@ -544,6 +576,15 @@ function simulateMovement() {
       ? 'Delayed - Heavy Traffic'
       : 'In Transit';
 
+    // Calculate heading/bearing along the road direction
+    const segIdx = position.index;
+    const nextIdx = Math.min(segIdx + 1, state.routeCoords.length - 1);
+    const pCurrent = state.routeCoords[segIdx];
+    const pNext = state.routeCoords[nextIdx];
+    const fromP = state.isReversing ? pNext : pCurrent;
+    const toP = state.isReversing ? pCurrent : pNext;
+    truck.bearing = calculateBearing(fromP[0], fromP[1], toP[0], toP[1]);
+
     // -----------------------------------------------------------------------
     // STEP 5: Calculate ETA using remaining route distance
     // -----------------------------------------------------------------------
@@ -629,6 +670,24 @@ app.get('/api/trucks/:truckId', (req, res) => {
   });
 });
 
+// GET /api/routes - Returns all pre-calculated road route coordinates
+app.get('/api/routes', (req, res) => {
+  const allRoutes = {};
+  for (const [id, s] of Object.entries(truckRouteState)) {
+    if (s.routeCoords) {
+      allRoutes[id] = {
+        routeCoords: s.routeCoords,
+        start: TRUCK_ROUTES[id]?.start,
+        end: TRUCK_ROUTES[id]?.end
+      };
+    }
+  }
+  res.json({
+    success: true,
+    data: allRoutes
+  });
+});
+
 // ==============================================================================
 // SERVER STARTUP — Fetch OSRM routes, then start listening
 // ==============================================================================
@@ -659,6 +718,15 @@ async function startServer() {
       };
 
       console.log(`[ROUTE] ${truckId}: ${routeCoords.length} road points, ${totalKm} km total`);
+      if (routeCoords.length >= 2) {
+        const tr = trucks.find(t => t.truckId === truckId);
+        if (tr) {
+          tr.bearing = calculateBearing(
+            routeCoords[0][0], routeCoords[0][1],
+            routeCoords[1][0], routeCoords[1][1]
+          );
+        }
+      }
     } else {
       console.warn(`[ROUTE] ${truckId}: OSRM route failed — truck will be stationary`);
     }
